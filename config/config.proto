@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package config;
+
+message WebsiteConfig {
+  // Identifier of the web site (to group different vhost names).
+  string identifier = 1;
+
+  // Names of all virtual host names associated with the web site.
+  repeated string vhost_name = 2;
+}
+
+message CStaticConfig {
+  // Cassandra servers to contact.
+  repeated string cassandra_server = 1;
+
+  // Cassandra keyspace to store into.
+  string keyspace = 2;
+
+  // Static web sites.
+  repeated WebsiteConfig site_configs = 3;
+
+  // Base path for uploads.
+  string upload_path = 4;
+
+  // Timeout for opening the upload path. Unit: milliseconds.
+  uint64 upload_open_timeout = 5;
+}

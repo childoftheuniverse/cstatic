@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package cstatic;
+
+message UploadSingleFileRequest {
+  // Name of the website containing the file
+  string website_identifier = 1;
+
+  // Path relative to the web site
+  string path = 2;
+
+  // Contents of the file being uploaded. After the initial request proto, this
+  // is the only field that needs to be filled
+  bytes contents = 3;
+}
+
+message UploadSingleFileResponse {
+}
+
+service UploadService {
+  rpc UploadSingleFile(stream UploadSingleFileRequest) returns (UploadSingleFileResponse) {}
+}
