@@ -432,6 +432,7 @@ func (service *UploadService) UploadSingleFile(
 		"UPDATE file_contents SET file_location = ?, offset = ?, length = ?, "+
 			"modified = ? WHERE site = ? AND path = ?",
 		service.currentFilePath.String(), offset, length, time.Now(), siteID, path)
+	defer query.Release()
 	if err = query.Exec(); err != nil {
 		return err
 	}
