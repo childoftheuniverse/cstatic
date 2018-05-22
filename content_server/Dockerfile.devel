@@ -1,0 +1,11 @@
+FROM ubuntu:artful
+LABEL maintainer Child of the Universe <childoftheuniverse@protonmail.com>
+
+COPY content_server /go/bin/content_server
+
+RUN apt-get -q -y update && apt-get -q -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold --purge install librados2
+
+RUN ["/usr/sbin/adduser", "--system", "--home", "/nonexistent", "--no-create-home", "--gecos", "Static Web Content Server", "--group", "--disabled-password", "cstatic-content"]
+VOLUME ["/etc/ceph", "/secrets"]
+USER cstatic-content
+ENTRYPOINT ["/go/bin/content_server"]
