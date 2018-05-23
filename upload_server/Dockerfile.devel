@@ -1,11 +1,11 @@
 FROM ubuntu:artful
 LABEL maintainer Child of the Universe <childoftheuniverse@protonmail.com>
 
-COPY upload_server /go/bin/upload_server
-
-RUN apt-get -q -y update && apt-get -q -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold --purge install librados2
+RUN apt-get -q -y update && apt-get -q -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold --purge install librados2 && apt-get -q -y clean
 
 RUN ["/usr/sbin/adduser", "--system", "--home", "/nonexistent", "--no-create-home", "--gecos", "Static Web Upload Server", "--group", "--disabled-password", "cstatic-upload"]
+COPY upload_server /go/bin/upload_server
+
 VOLUME ["/etc/ceph", "/secrets"]
 USER cstatic-upload
 ENTRYPOINT ["/go/bin/upload_server"]

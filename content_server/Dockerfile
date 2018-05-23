@@ -2,7 +2,7 @@ FROM golang:1.10
 LABEL maintainer Child of the Universe <childoftheuniverse@protonmail.com>
 
 # Set up protocol buffer compile pipeline
-RUN apt-get -q -y update && apt-get -q -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold --purge install gcc libc-dev protobuf-compiler librados-dev
+RUN apt-get -q -y update && apt-get -q -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold --purge install gcc libc-dev protobuf-compiler librados-dev && apt-get -q -y clean
 RUN go get github.com/golang/protobuf/protoc-gen-go
 
 # Now, get and install the main binary
