@@ -46,7 +46,6 @@ func main() {
 	var bindAddress string
 	var rpcBindAddress string
 	var etcdServerList string
-	var etcdServers []string
 	var etcdTimeout time.Duration
 	var etcdConfig etcd.Config
 
@@ -128,6 +127,8 @@ func main() {
 			if !tlsConfig.ClientCAs.AppendCertsFromPEM(certContents) {
 				log.Fatal("Error loading X.509 client CA from ", clientCA)
 			}
+
+			tlsConfig.RootCAs = tlsConfig.ClientCAs
 		}
 		if rpcBindAddress != "" {
 			if listener, err = net.Listen("tcp", bindAddress); err != nil {
@@ -161,9 +162,7 @@ func main() {
 		defer rpcListener.Close()
 	}
 
-	etcdServers = strings.Split(etcdServerList, ",")
-
-	etcdConfig.Endpoints = etcdServers
+	etcdConfig.Endpoints = strings.Split(etcdServerList, ",")
 	etcdConfig.DialTimeout = etcdTimeout
 
 	if tlsConfig != nil {
