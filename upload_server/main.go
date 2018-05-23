@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
@@ -19,10 +18,27 @@ import (
 	_ "github.com/childoftheuniverse/filesystem-file"
 	rados "github.com/childoftheuniverse/filesystem-rados"
 	etcd "github.com/coreos/etcd/clientv3"
-	"github.com/coreos/etcd/mvcc/mvccpb"
 )
 
 var cancel context.CancelFunc
+var listener net.Listener
+var rpcListener net.Listener
+
+/*
+Combined function for all cleanup tasks to be done in the signal handler.
+*/
+func cleanup() {
+	if cancel != nil {
+		cancel()
+	}
+	if listener != nil {
+		listener.Close()
+	}
+	if rpcListener != nil {
+		rpcListener.Close()
+	}
+	os.Exit(1)
+}
 
 /*
 Stop etcd listener when receiving SIGINT or SIGTERM.
@@ -32,13 +48,18 @@ func handleSignals(sigChannel chan os.Signal) {
 		var s = <-sigChannel
 		switch s {
 		case syscall.SIGINT:
-			cancel()
-			os.Exit(1)
+			cleanup()
 		case syscall.SIGTERM:
-			cancel()
-			os.Exit(1)
+			cleanup()
 		}
 	}
+}
+
+/*
+Reports an error from the parent function, then cleans up.
+*/
+func reportErrorAndCleanup(err error) {
+	log.Print("Error in MainLoop: ", err)
 }
 
 func main() {
@@ -52,20 +73,11 @@ func main() {
 	var privateKeyPath string
 	var publicKeyPath string
 	var clientCA string
-	var radosConfigPath string
 
 	var sigChannel = make(chan os.Signal)
 	var client *etcd.Client
 	var uploadService UploadService
-	var configUpdateChannel etcd.WatchChan
-	var configUpdate etcd.WatchResponse
-	var getResp *etcd.GetResponse
-	var kv *mvccpb.KeyValue
-	var rev int64
-	var listener net.Listener
-	var rpcListener net.Listener
 	var tlsConfig *tls.Config
-	var ctx context.Context
 	var err error
 
 	flag.StringVar(&configPath, "config", "",
@@ -87,22 +99,14 @@ func main() {
 	flag.StringVar(&clientCA, "client-ca", "",
 		"Path to a client CA certificate file. If unset, clients will not be "+
 			"authenticated.")
-
-	/* Filesystem configuration */
-	flag.StringVar(&radosConfigPath, "rados-config", "",
-		"Path of a Rados configuration to read")
 	flag.Parse()
 
 	/* Cancel etcd watcher when we stop the process. */
 	signal.Notify(sigChannel, syscall.SIGINT, syscall.SIGTERM)
 	go handleSignals(sigChannel)
 
-	if radosConfigPath != "" {
-		err = rados.RegisterRadosConfig(radosConfigPath)
-		if err != nil {
-			fmt.Println("error reading RADOS configuration ", radosConfigPath, ": ",
-				err)
-		}
+	if err = rados.InitRados(); err != nil {
+		log.Fatal("Error initializing Rados: ", err)
 	}
 
 	if privateKeyPath != "" && publicKeyPath != "" {
@@ -174,32 +178,11 @@ func main() {
 	}
 	defer client.Close()
 
-	go uploadService.MainLoop(listener, rpcListener, tlsConfig)
+	go uploadService.WatchForConfigChanges(client, etcdTimeout, configPath)
 
-	ctx, cancel = context.WithTimeout(context.Background(), etcdTimeout)
-
-	getResp, err = client.Get(ctx, configPath)
-	cancel()
+	err = uploadService.MainLoop(listener, rpcListener, tlsConfig)
 	if err != nil {
-		log.Fatal("Error reading configuration from ", configPath, ": ", err)
+		log.Print("Error in MainLoop: ", err)
 	}
-	if len(getResp.Kvs) < 1 {
-		log.Print("Cannot find current version of ", configPath)
-	}
-	for _, kv = range getResp.Kvs {
-		rev = kv.ModRevision
-	}
-
-	ctx, cancel = context.WithCancel(context.Background())
-	defer cancel()
-
-	configUpdateChannel = client.Watch(
-		ctx, configPath, etcd.WithCreatedNotify(),
-		etcd.WithRev(rev))
-	for configUpdate = range configUpdateChannel {
-		var ev *etcd.Event
-		for _, ev = range configUpdate.Events {
-			uploadService.UploadConfig(ev.Kv.Value)
-		}
-	}
+	cleanup()
 }

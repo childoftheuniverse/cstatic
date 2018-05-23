@@ -17,6 +17,8 @@ import (
 	"github.com/childoftheuniverse/cstatic"
 	"github.com/childoftheuniverse/cstatic/config"
 	"github.com/childoftheuniverse/filesystem"
+	etcd "github.com/coreos/etcd/clientv3"
+	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/gocql/gocql"
 	"github.com/gogo/protobuf/proto"
 	"github.com/prometheus/client_golang/prometheus"
@@ -107,6 +109,50 @@ type UploadService struct {
 
 	/* Internal status */
 	initialized bool
+}
+
+/*
+WatchForConfigChanges watches the configured etcd location for updates and
+invokes UploadConfig as required.
+*/
+func (service *UploadService) WatchForConfigChanges(
+	client *etcd.Client, etcdTimeout time.Duration, configPath string) {
+	var configUpdateChannel etcd.WatchChan
+	var configUpdate etcd.WatchResponse
+	var getResp *etcd.GetResponse
+	var kv *mvccpb.KeyValue
+	var rev int64
+	var ctx context.Context
+	var err error
+
+	ctx, cancel = context.WithTimeout(context.Background(), etcdTimeout)
+
+	getResp, err = client.Get(ctx, configPath)
+	cancel()
+	if err != nil {
+		log.Print("Error reading configuration from ", configPath, ": ", err)
+		cleanup()
+	}
+	if len(getResp.Kvs) < 1 {
+		log.Print("Cannot find current version of ", configPath)
+	}
+	for _, kv = range getResp.Kvs {
+		rev = kv.ModRevision
+		service.UploadConfig(kv.Value)
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	configUpdateChannel = client.Watch(
+		ctx, configPath, etcd.WithCreatedNotify(),
+		etcd.WithRev(rev+1))
+	for configUpdate = range configUpdateChannel {
+		var ev *etcd.Event
+		for _, ev = range configUpdate.Events {
+			service.UploadConfig(ev.Kv.Value)
+		}
+	}
 }
 
 /*
@@ -304,14 +350,12 @@ func (service *UploadService) MainLoop(
 	reflection.Register(service.grpcServer)
 
 	if rpcListener != nil {
-		log.Print("Listening for RPCs on ", rpcListener.Addr())
 		go service.grpcServe(rpcListener)
 	}
 	log.Print("Listening for connections on ", listener.Addr())
 	log.Print("Health checks: ", proto, "://", listener.Addr(), "/health")
 	log.Print("Metrics: ", proto, "://", listener.Addr(), "/metrics")
 	return http.Serve(listener, service)
-	// return grpcServer.Serve(listener)
 }
 
 /*
@@ -319,6 +363,7 @@ Start listening for gRPC connections on the specified listener.
 */
 func (service *UploadService) grpcServe(listener net.Listener) {
 	var err error
+	log.Print("Listening for RPCs on ", listener.Addr())
 	if err = service.grpcServer.Serve(listener); err != nil {
 		cancel()
 		var err2 error

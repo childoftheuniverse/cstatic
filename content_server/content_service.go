@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"io"
 	"log"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/childoftheuniverse/cstatic/config"
 	"github.com/childoftheuniverse/filesystem"
+	etcd "github.com/coreos/etcd/clientv3"
+	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/gocql/gocql"
 	"github.com/gogo/protobuf/proto"
 	"github.com/prometheus/client_golang/prometheus"
@@ -94,6 +97,50 @@ type ContentService struct {
 
 	/* Internal status */
 	initialized bool
+}
+
+/*
+WatchForConfigChanges watches the configured etcd location for updates and
+invokes ServingConfig as required.
+*/
+func (service *ContentService) WatchForConfigChanges(
+	client *etcd.Client, etcdTimeout time.Duration, configPath string) {
+	var configUpdateChannel etcd.WatchChan
+	var configUpdate etcd.WatchResponse
+	var getResp *etcd.GetResponse
+	var kv *mvccpb.KeyValue
+	var rev int64
+	var ctx context.Context
+	var err error
+
+	ctx, cancel = context.WithTimeout(context.Background(), etcdTimeout)
+
+	getResp, err = client.Get(ctx, configPath)
+	cancel()
+	if err != nil {
+		log.Print("Error reading configuration from ", configPath, ": ", err)
+		cleanup()
+	}
+	if len(getResp.Kvs) < 1 {
+		log.Print("Cannot find current version of ", configPath)
+	}
+	for _, kv = range getResp.Kvs {
+		rev = kv.ModRevision
+		service.ServingConfig(kv.Value)
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	configUpdateChannel = client.Watch(
+		ctx, configPath, etcd.WithCreatedNotify(),
+		etcd.WithRev(rev+1))
+	for configUpdate = range configUpdateChannel {
+		var ev *etcd.Event
+		for _, ev = range configUpdate.Events {
+			service.ServingConfig(ev.Kv.Value)
+		}
+	}
 }
 
 /*
