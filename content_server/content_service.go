@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -70,11 +71,10 @@ func init() {
 	prometheus.MustRegister(cassandraRetries)
 }
 
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
+func logError(prefix string, err error) {
+	if err != nil {
+		log.Print("%s: %v", err)
 	}
-	return b
 }
 
 /*
@@ -283,12 +283,14 @@ func (service *ContentService) ServeHTTP(
 	var contentURL *url.URL
 	var parentContext = r.Context()
 	var reader filesystem.ReadCloser
+	var limitedReader filesystem.ReadCloser
 	var seeker filesystem.Seeker
 	var siteID string
 	var query *gocql.Query
 	var hasWritten bool
 	var ok bool
 	var err error
+	var buf = make([]byte, 1<<10)
 
 	service.settingsLock.RLock()
 	defer service.settingsLock.RUnlock()
@@ -324,6 +326,10 @@ func (service *ContentService) ServeHTTP(
 		return
 	}
 
+	cassandraLatencies.Observe(
+		(time.Duration(query.Latency()) * time.Nanosecond).Seconds())
+	cassandraRetries.Observe(float64(query.Attempts()))
+
 	if contentURL, err = url.Parse(location); err != nil {
 		log.Print("Unable to parse location for ", location, ": ", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -337,6 +343,8 @@ func (service *ContentService) ServeHTTP(
 		w.Write([]byte("Error processing content metadata"))
 		return
 	}
+	defer logError(fmt.Sprintf("Error closing reader for %s",
+		contentURL.String()), reader.Close(parentContext))
 
 	if seeker, ok = reader.(filesystem.Seeker); !ok {
 		log.Print("Filesystem type for ", contentURL.String(),
@@ -353,24 +361,26 @@ func (service *ContentService) ServeHTTP(
 		return
 	}
 
-	for length > 0 {
-		var buf = make([]byte, maxInt64(length, 1<<10))
+	limitedReader = &filesystem.LimitedReadCloser{R: reader, N: length}
+
+	for {
 		var readLength int
 		if parentContext.Err() != nil {
 			/* TODO: increment a counter with the category of error */
-			return
+			break
 		}
 
-		if readLength, err = reader.Read(parentContext, buf); err != nil {
-			if err == io.EOF {
-				break
-			}
+		readLength, err = limitedReader.Read(parentContext, buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
 			log.Print("Error reading from ", contentURL.String(), ": ", err)
 			if !hasWritten {
 				w.WriteHeader(http.StatusInternalServerError)
 				w.Write([]byte("Read error"))
 			}
-			return
+			break
 		}
 
 		if !hasWritten {
@@ -382,11 +392,5 @@ func (service *ContentService) ServeHTTP(
 		if _, err = w.Write(buf[:readLength]); err != nil {
 			log.Print("Unable to write client response: ", err)
 		}
-
-		length -= int64(readLength)
 	}
-
-	cassandraLatencies.Observe(
-		(time.Duration(query.Latency()) * time.Nanosecond).Seconds())
-	cassandraRetries.Observe(float64(query.Attempts()))
 }
