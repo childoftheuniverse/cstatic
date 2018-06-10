@@ -12,6 +12,9 @@ message UploadSingleFileRequest {
   // Contents of the file being uploaded. After the initial request proto, this
   // is the only field that needs to be filled
   bytes contents = 3;
+
+  // Content type of the content to be served
+  string content_type = 4;
 }
 
 message UploadSingleFileResponse {

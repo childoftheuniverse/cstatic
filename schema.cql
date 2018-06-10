@@ -6,6 +6,7 @@ CREATE KEYSPACE staticweb WITH replication = {
 CREATE TABLE file_contents (
   site ascii,
   path ascii,
+  content_type ascii,
   file_location ascii,
   offset bigint,
   length bigint,

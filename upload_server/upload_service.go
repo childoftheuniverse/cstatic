@@ -407,6 +407,7 @@ func (service *UploadService) UploadSingleFile(
 	var query *gocql.Query
 	var siteID string
 	var path string
+	var contentType string
 	var offset = service.currentFileSize
 	var length uint64
 	var err error
@@ -459,6 +460,9 @@ func (service *UploadService) UploadSingleFile(
 
 			siteID = req.WebsiteIdentifier
 		}
+		if len(req.ContentType) > 0 {
+			contentType = req.ContentType
+		}
 
 		readLength, err = service.currentFile.Write(parentContext, req.Contents)
 		service.currentFileSize += uint64(readLength)
@@ -474,9 +478,10 @@ func (service *UploadService) UploadSingleFile(
 	}
 
 	query = service.session.Query(
-		"UPDATE file_contents SET file_location = ?, offset = ?, length = ?, "+
-			"modified = ? WHERE site = ? AND path = ?",
-		service.currentFilePath.String(), offset, length, time.Now(), siteID, path)
+		"UPDATE file_contents SET content_type = ?, file_location = ?, "+
+			"offset = ?, length = ?, modified = ? WHERE site = ? AND path = ?",
+		contentType, service.currentFilePath.String(), offset, length,
+		time.Now(), siteID, path)
 	defer query.Release()
 	if err = query.Exec(); err != nil {
 		return err

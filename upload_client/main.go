@@ -21,6 +21,7 @@ func main() {
 	var serverAddr string
 	var localPath string
 	var remotePath string
+	var contentType string
 	var serviceName string
 	var failFast bool
 
@@ -54,6 +55,8 @@ func main() {
 		"Path to the file to upload")
 	flag.StringVar(&remotePath, "remote-path", "",
 		"Path of the file on the server")
+	flag.StringVar(&contentType, "content-type", "text/plain; charset=utf-8",
+		"Content type of the uploaded content")
 	flag.StringVar(&serviceName, "service-name", "",
 		"Name of the website service to upload to")
 	flag.Parse()
@@ -96,6 +99,7 @@ func main() {
 
 	req.WebsiteIdentifier = serviceName
 	req.Path = remotePath
+	req.ContentType = contentType
 	buf = make([]byte, 1048576)
 
 	for {

@@ -277,6 +277,7 @@ func (service *ContentService) ServeHTTP(
 		time.Now().Sub(startTime).Seconds())
 
 	var location string
+	var contentType string
 	var offset int64
 	var length int64
 	var myURL *url.URL
@@ -316,10 +317,10 @@ func (service *ContentService) ServeHTTP(
 	}
 
 	query = service.session.Query(
-		"SELECT file_location, offset, length FROM file_contents "+
-			"WHERE site = ? AND path = ?", siteID, myURL.Path)
+		"SELECT content_type, file_location, offset, length FROM "+
+			"file_contents WHERE site = ? AND path = ?", siteID, myURL.Path)
 	defer query.Release()
-	if err = query.Scan(&location, &offset, &length); err != nil {
+	if err = query.Scan(&contentType, &location, &offset, &length); err != nil {
 		log.Print("Unable to scan for ", myURL.Path, ": ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Error fetching content metadata"))
@@ -384,6 +385,7 @@ func (service *ContentService) ServeHTTP(
 		}
 
 		if !hasWritten {
+			w.Header().Set("Content-Type", contentType)
 			w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 			w.WriteHeader(http.StatusOK)
 			hasWritten = true
