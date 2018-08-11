@@ -513,7 +513,7 @@ func (service *UploadService) UploadSingleFile(
 		contentType, service.currentFilePath.String(), offset, length,
 		time.Now(), siteID, path)
 	defer query.Release()
-	if err = query.Exec(); err != nil {
+	if err = query.WithContext(parentContext).Exec(); err != nil {
 		return err
 	}
 
