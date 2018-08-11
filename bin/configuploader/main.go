@@ -12,7 +12,7 @@ import (
 	"github.com/childoftheuniverse/cstatic/config"
 	etcd "github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/pkg/transport"
-	"github.com/gogo/protobuf/proto"
+	"github.com/golang/protobuf/proto"
 )
 
 func main() {
