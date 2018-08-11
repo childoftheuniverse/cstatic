@@ -87,7 +87,7 @@ func init() {
 
 func logError(prefix string, err error) {
 	if err != nil {
-		log.Print("%s: %v", err)
+		log.Printf("%s: %v", prefix, err)
 	}
 }
 
