@@ -356,7 +356,8 @@ func (service *ContentService) ServeHTTP(
 
 	query = service.session.Query(
 		"SELECT content_type, file_location, offset, length FROM "+
-			"file_contents WHERE site = ? AND path = ?", siteID, myURL.Path)
+			"file_contents WHERE site = ? AND path = ?",
+		siteID, myURL.Path).WithContext(parentContext)
 	defer query.Release()
 	if err = query.Scan(&contentType, &location, &offset, &length); err != nil {
 		log.Print("Unable to scan for ", myURL.Path, ": ", err)
