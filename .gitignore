@@ -11,9 +11,10 @@
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
-configuploader/configuploader
-content_server/content_server
-upload_client/upload_client
-upload_server/upload_server
+bin/configuploader/configuploader
+bin/content_server/content_server
+bin/upload_client/upload_client
+bin/upload_server/upload_server
 
 *.pb.go
+*.pb

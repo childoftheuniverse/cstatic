@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
@@ -14,52 +13,28 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/childoftheuniverse/cstatic/upload"
 	_ "github.com/childoftheuniverse/filesystem"
 	_ "github.com/childoftheuniverse/filesystem-file"
 	rados "github.com/childoftheuniverse/filesystem-rados"
 	etcd "github.com/coreos/etcd/clientv3"
 )
 
-var cancel context.CancelFunc
-var listener net.Listener
-var rpcListener net.Listener
-
-/*
-Combined function for all cleanup tasks to be done in the signal handler.
-*/
-func cleanup() {
-	if cancel != nil {
-		cancel()
-	}
-	if listener != nil {
-		listener.Close()
-	}
-	if rpcListener != nil {
-		rpcListener.Close()
-	}
-	os.Exit(1)
-}
-
 /*
 Stop etcd listener when receiving SIGINT or SIGTERM.
 */
-func handleSignals(sigChannel chan os.Signal) {
+func handleSignals(
+	uploadService *upload.UploadService, sigChannel chan os.Signal) {
 	for {
 		var s = <-sigChannel
 		switch s {
 		case syscall.SIGINT:
-			cleanup()
+			fallthrough
 		case syscall.SIGTERM:
-			cleanup()
+			uploadService.Cleanup()
+			os.Exit(1)
 		}
 	}
-}
-
-/*
-Reports an error from the parent function, then cleans up.
-*/
-func reportErrorAndCleanup(err error) {
-	log.Print("Error in MainLoop: ", err)
 }
 
 func main() {
@@ -76,7 +51,9 @@ func main() {
 
 	var sigChannel = make(chan os.Signal)
 	var client *etcd.Client
-	var uploadService UploadService
+	var uploadService upload.UploadService
+	var listener net.Listener
+	var rpcListener net.Listener
 	var tlsConfig *tls.Config
 	var err error
 
@@ -103,7 +80,7 @@ func main() {
 
 	/* Cancel etcd watcher when we stop the process. */
 	signal.Notify(sigChannel, syscall.SIGINT, syscall.SIGTERM)
-	go handleSignals(sigChannel)
+	go handleSignals(&uploadService, sigChannel)
 
 	if err = rados.InitRados(); err != nil {
 		log.Fatal("Error initializing Rados: ", err)
@@ -184,5 +161,5 @@ func main() {
 	if err != nil {
 		log.Print("Error in MainLoop: ", err)
 	}
-	cleanup()
+	uploadService.Cleanup()
 }

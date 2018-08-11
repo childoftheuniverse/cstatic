@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"flag"
 	"log"
@@ -11,30 +10,26 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/childoftheuniverse/cstatic/server"
 	_ "github.com/childoftheuniverse/filesystem-file"
 	rados "github.com/childoftheuniverse/filesystem-rados"
 	etcd "github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/pkg/transport"
 )
 
-var cancel context.CancelFunc
-
-func cleanup() {
-	cancel()
-	os.Exit(1)
-}
-
 /*
 Stop etcd listener when receiving SIGINT or SIGTERM.
 */
-func handleSignals(sigChannel chan os.Signal) {
+func handleSignals(
+	contentService *server.ContentService, sigChannel chan os.Signal) {
 	for {
 		var s = <-sigChannel
 		switch s {
 		case syscall.SIGINT:
-			cleanup()
+			fallthrough
 		case syscall.SIGTERM:
-			cleanup()
+			contentService.Cleanup()
+			os.Exit(1)
 		}
 	}
 }
@@ -50,7 +45,7 @@ func main() {
 	var publicKeyPath string
 	var serverCA string
 
-	var contentService ContentService
+	var contentService server.ContentService
 	var sigChannel = make(chan os.Signal)
 	var client *etcd.Client
 	var tlsConfig *tls.Config
@@ -78,7 +73,7 @@ func main() {
 
 	/* Cancel etcd watcher when we stop the process. */
 	signal.Notify(sigChannel, syscall.SIGINT, syscall.SIGTERM)
-	go handleSignals(sigChannel)
+	go handleSignals(&contentService, sigChannel)
 
 	if err = rados.InitRados(); err != nil {
 		log.Fatal("Error initializing rados: ", err)
@@ -112,5 +107,5 @@ func main() {
 	if err = contentService.MainLoop(bindAddress); err != nil {
 		log.Print("Error in MainLoop: ", err)
 	}
-	cleanup()
+	contentService.Cleanup()
 }

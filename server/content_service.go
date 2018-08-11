@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -44,22 +44,34 @@ var requestForUnknownSite = prometheus.NewCounter(prometheus.CounterOpts{
 	Help:      "Number of requests received for a site that is not configured.",
 })
 var requestLatencies = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-	Subsystem: "uploadservice",
+	Subsystem: "contentservice",
 	Name:      "request_latency",
 	Help:      "Latency of upload requests",
-	Buckets:   prometheus.ExponentialBuckets(0.001, 5, 20),
+	Buckets:   prometheus.ExponentialBuckets(0.001, 2, 50),
 }, []string{"rpc_command"})
 var cassandraLatencies = prometheus.NewHistogram(prometheus.HistogramOpts{
-	Subsystem: "uploadservice",
+	Subsystem: "contentservice",
 	Name:      "cassandra_latency",
 	Help:      "Latency of Cassandra requests",
-	Buckets:   prometheus.ExponentialBuckets(0.001, 5, 20),
+	Buckets:   prometheus.ExponentialBuckets(0.001, 2, 50),
 })
 var cassandraRetries = prometheus.NewHistogram(prometheus.HistogramOpts{
-	Subsystem: "uploadservice",
+	Subsystem: "contentservice",
 	Name:      "cassandra_retries",
 	Help:      "Number of retries of Cassandra requests",
-	Buckets:   prometheus.LinearBuckets(1.0, 1.0, 20),
+	Buckets:   prometheus.LinearBuckets(1.0, 1.0, 50),
+})
+var backendReadsPerRequest = prometheus.NewHistogram(prometheus.HistogramOpts{
+	Subsystem: "contentservice",
+	Name:      "backend_reads_per_request",
+	Help:      "Number of reads performed per request",
+	Buckets:   prometheus.LinearBuckets(1.0, 1.0, 50),
+})
+var bytesPerRead = prometheus.NewHistogram(prometheus.HistogramOpts{
+	Subsystem: "contentservice",
+	Name:      "backend_bytes_per_read",
+	Help:      "Number of bytes returned per read request",
+	Buckets:   prometheus.ExponentialBuckets(1.0, 1.5, 50),
 })
 
 func init() {
@@ -69,6 +81,8 @@ func init() {
 	prometheus.MustRegister(requestForUnknownSite)
 	prometheus.MustRegister(cassandraLatencies)
 	prometheus.MustRegister(cassandraRetries)
+	prometheus.MustRegister(backendReadsPerRequest)
+	prometheus.MustRegister(bytesPerRead)
 }
 
 func logError(prefix string, err error) {
@@ -96,12 +110,29 @@ type ContentService struct {
 	session *gocql.Session
 
 	/* Internal status */
-	initialized bool
+	initialized           bool
+	configWatchCancelFunc context.CancelFunc
+	configWatcherRunning  sync.Mutex
+}
+
+/*
+Cleanup cancels all config watch operations currently in progress. It should be
+invoked in response to termination signals being received.
+*/
+func (service *ContentService) Cleanup() {
+	if service.configWatchCancelFunc != nil {
+		service.configWatchCancelFunc()
+	}
+	service.initialized = false // We just stopped listening for config updates.
 }
 
 /*
 WatchForConfigChanges watches the configured etcd location for updates and
 invokes ServingConfig as required.
+
+This function should only ever be called once, during initialization, and will
+continue running in the background. Parallel invocations of this fuction on
+the same ContentService will block until the previous incarnation has exited.
 */
 func (service *ContentService) WatchForConfigChanges(
 	client *etcd.Client, etcdTimeout time.Duration, configPath string) {
@@ -113,13 +144,18 @@ func (service *ContentService) WatchForConfigChanges(
 	var ctx context.Context
 	var err error
 
-	ctx, cancel = context.WithTimeout(context.Background(), etcdTimeout)
+	service.configWatcherRunning.Lock()
+	defer service.configWatcherRunning.Unlock()
+
+	ctx, service.configWatchCancelFunc =
+		context.WithTimeout(context.Background(), etcdTimeout)
 
 	getResp, err = client.Get(ctx, configPath)
-	cancel()
+	service.configWatchCancelFunc()
 	if err != nil {
 		log.Print("Error reading configuration from ", configPath, ": ", err)
-		cleanup()
+		service.Cleanup()
+		return
 	}
 	if len(getResp.Kvs) < 1 {
 		log.Print("Cannot find current version of ", configPath)
@@ -129,8 +165,9 @@ func (service *ContentService) WatchForConfigChanges(
 		service.ServingConfig(kv.Value)
 	}
 
-	ctx, cancel = context.WithCancel(context.Background())
-	defer cancel()
+	ctx, service.configWatchCancelFunc =
+		context.WithCancel(context.Background())
+	defer service.configWatchCancelFunc()
 
 	configUpdateChannel = client.Watch(
 		ctx, configPath, etcd.WithCreatedNotify(),
@@ -288,10 +325,11 @@ func (service *ContentService) ServeHTTP(
 	var seeker filesystem.Seeker
 	var siteID string
 	var query *gocql.Query
+	var buf = make([]byte, 1<<10)
+	var numReadsRequired uint64
 	var hasWritten bool
 	var ok bool
 	var err error
-	var buf = make([]byte, 1<<10)
 
 	service.settingsLock.RLock()
 	defer service.settingsLock.RUnlock()
@@ -366,11 +404,13 @@ func (service *ContentService) ServeHTTP(
 
 	for {
 		var readLength int
+
 		if parentContext.Err() != nil {
 			/* TODO: increment a counter with the category of error */
 			break
 		}
 
+		numReadsRequired++
 		readLength, err = limitedReader.Read(parentContext, buf)
 		if err == io.EOF {
 			break
@@ -384,6 +424,8 @@ func (service *ContentService) ServeHTTP(
 			break
 		}
 
+		bytesPerRead.Observe(float64(readLength))
+
 		if !hasWritten {
 			w.Header().Set("Content-Type", contentType)
 			w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
@@ -395,4 +437,6 @@ func (service *ContentService) ServeHTTP(
 			log.Print("Unable to write client response: ", err)
 		}
 	}
+
+	backendReadsPerRequest.Observe(float64(numReadsRequired))
 }

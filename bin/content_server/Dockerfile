@@ -10,7 +10,7 @@ RUN mkdir -p /go/src/github.com/childoftheuniverse
 RUN cd /go/src/github.com/childoftheuniverse; git clone https://github.com/childoftheuniverse/cstatic.git
 RUN cd /go/src/github.com/childoftheuniverse/cstatic; protoc --go_out=plugins=grpc:. *.proto
 RUN cd /go/src/github.com/childoftheuniverse/cstatic/config; protoc --go_out=plugins=grpc:. *.proto
-RUN go get -v github.com/childoftheuniverse/cstatic/content_server
+RUN go get -v github.com/childoftheuniverse/cstatic/bin/content_server
 
 RUN ["/usr/sbin/adduser", "--system", "--home", "/nonexistent", "--no-create-home", "--gecos", "Static Web Content Server", "--group", "--disabled-password", "cstatic-content"]
 VOLUME ["/etc/ceph", "/secrets"]

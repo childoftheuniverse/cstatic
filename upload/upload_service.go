@@ -1,4 +1,4 @@
-package main
+package upload
 
 import (
 	"context"
@@ -108,12 +108,36 @@ type UploadService struct {
 	currentFileSize uint64
 
 	/* Internal status */
-	initialized bool
+	initialized           bool
+	configWatchCancelFunc context.CancelFunc
+	configWatcherRunning  sync.Mutex
+}
+
+/*
+Cleanup cancels all config watch operations currently in progress, closes all
+listeners and initiates an os.Exit call. It should be invoked in response to
+termination signals being received.
+*/
+func (service *UploadService) Cleanup() {
+	if service.configWatchCancelFunc != nil {
+		service.configWatchCancelFunc()
+	}
+	service.initialized = false // We just stopped listening for config updates.
+	if service.listener != nil {
+		service.listener.Close()
+	}
+	if service.rpcListener != nil && service.rpcListener != service.listener {
+		service.rpcListener.Close()
+	}
 }
 
 /*
 WatchForConfigChanges watches the configured etcd location for updates and
 invokes UploadConfig as required.
+
+This function should only ever be called once, during initialization, and will
+continue running in the background. Parallel invocations of this fuction on
+the same ContentService will block until the previous incarnation has exited.
 */
 func (service *UploadService) WatchForConfigChanges(
 	client *etcd.Client, etcdTimeout time.Duration, configPath string) {
@@ -125,13 +149,18 @@ func (service *UploadService) WatchForConfigChanges(
 	var ctx context.Context
 	var err error
 
-	ctx, cancel = context.WithTimeout(context.Background(), etcdTimeout)
+	service.configWatcherRunning.Lock()
+	defer service.configWatcherRunning.Unlock()
+
+	ctx, service.configWatchCancelFunc =
+		context.WithTimeout(context.Background(), etcdTimeout)
 
 	getResp, err = client.Get(ctx, configPath)
-	cancel()
+	service.configWatchCancelFunc()
 	if err != nil {
 		log.Print("Error reading configuration from ", configPath, ": ", err)
-		cleanup()
+		service.Cleanup()
+		return
 	}
 	if len(getResp.Kvs) < 1 {
 		log.Print("Cannot find current version of ", configPath)
@@ -141,8 +170,9 @@ func (service *UploadService) WatchForConfigChanges(
 		service.UploadConfig(kv.Value)
 	}
 
-	ctx, cancel = context.WithCancel(context.Background())
-	defer cancel()
+	ctx, service.configWatchCancelFunc =
+		context.WithCancel(context.Background())
+	defer service.configWatchCancelFunc()
 
 	configUpdateChannel = client.Watch(
 		ctx, configPath, etcd.WithCreatedNotify(),
@@ -365,7 +395,7 @@ func (service *UploadService) grpcServe(listener net.Listener) {
 	var err error
 	log.Print("Listening for RPCs on ", listener.Addr())
 	if err = service.grpcServer.Serve(listener); err != nil {
-		cancel()
+		service.configWatchCancelFunc()
 		var err2 error
 		if err2 = service.listener.Close(); err2 != nil {
 			log.Print("Error shutting down service listener: ", err2)
