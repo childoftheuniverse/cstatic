@@ -13,8 +13,8 @@ import (
 	"github.com/childoftheuniverse/cstatic/server"
 	_ "github.com/childoftheuniverse/filesystem-file"
 	rados "github.com/childoftheuniverse/filesystem-rados"
-	etcd "github.com/coreos/etcd/clientv3"
-	"github.com/coreos/etcd/pkg/transport"
+	etcd "go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/pkg/transport"
 )
 
 /*

@@ -17,7 +17,7 @@ import (
 	_ "github.com/childoftheuniverse/filesystem"
 	_ "github.com/childoftheuniverse/filesystem-file"
 	rados "github.com/childoftheuniverse/filesystem-rados"
-	etcd "github.com/coreos/etcd/clientv3"
+	etcd "go.etcd.io/etcd/clientv3"
 )
 
 /*

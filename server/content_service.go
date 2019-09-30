@@ -15,8 +15,8 @@ import (
 
 	"github.com/childoftheuniverse/cstatic/config"
 	"github.com/childoftheuniverse/filesystem"
-	etcd "github.com/coreos/etcd/clientv3"
-	"github.com/coreos/etcd/mvcc/mvccpb"
+	etcd "go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/mvcc/mvccpb"
 	"github.com/gocql/gocql"
 	"github.com/golang/protobuf/proto"
 	"github.com/prometheus/client_golang/prometheus"

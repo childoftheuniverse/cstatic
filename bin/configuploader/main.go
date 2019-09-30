@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/childoftheuniverse/cstatic/config"
-	etcd "github.com/coreos/etcd/clientv3"
-	"github.com/coreos/etcd/pkg/transport"
+	etcd "go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/pkg/transport"
 	"github.com/golang/protobuf/proto"
 )
 
