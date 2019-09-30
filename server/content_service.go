@@ -13,14 +13,16 @@ import (
 	"sync"
 	"time"
 
+	prom_exporter "contrib.go.opencensus.io/exporter/prometheus"
 	"github.com/childoftheuniverse/cstatic/config"
 	"github.com/childoftheuniverse/filesystem"
-	etcd "go.etcd.io/etcd/clientv3"
-	"go.etcd.io/etcd/mvcc/mvccpb"
 	"github.com/gocql/gocql"
 	"github.com/golang/protobuf/proto"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	etcd "go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/mvcc/mvccpb"
+	"go.opencensus.io/trace"
 )
 
 var isInitialized = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -263,6 +265,7 @@ The function only exits if a listener could not be created, or once the listener
 has shut down.
 */
 func (service *ContentService) MainLoop(listenAddr string) error {
+	var pe *prom_exporter.Exporter
 	var err error
 	service.mux = http.NewServeMux()
 
@@ -296,7 +299,13 @@ func (service *ContentService) MainLoop(listenAddr string) error {
 		return err
 	}
 
+	if pe, err = prom_exporter.NewExporter(prom_exporter.Options{
+		Namespace: "cstatic_content_server",
+	}); pe != nil {
+		return fmt.Errorf("Error creating prometheus exporter: %s", err)
+	}
 	service.mux.Handle("/metrics", promhttp.Handler())
+	service.mux.Handle("/metrics-grpc", pe)
 	service.mux.Handle("/", service)
 
 	return http.ListenAndServe(listenAddr, service.mux)
@@ -320,6 +329,8 @@ func (service *ContentService) ServeHTTP(
 	var myURL *url.URL
 	var contentURL *url.URL
 	var parentContext = r.Context()
+	var ctx context.Context
+	var span *trace.Span
 	var reader filesystem.ReadCloser
 	var limitedReader filesystem.ReadCloser
 	var seeker filesystem.Seeker
@@ -331,12 +342,23 @@ func (service *ContentService) ServeHTTP(
 	var ok bool
 	var err error
 
+	ctx, span = trace.StartSpan(parentContext, "ContentService.ServeHTTP")
+	defer span.End()
+
 	service.settingsLock.RLock()
 	defer service.settingsLock.RUnlock()
+
+	span.AddAttributes(
+		trace.StringAttribute("host-header", r.Host),
+		trace.StringAttribute("request-uri", r.RequestURI))
 
 	/* Before we do anything, check that this RPC is still relevant. */
 	if parentContext.Err() != nil {
 		/* TODO: increment a counter with the category of error */
+		span.Annotate(
+			[]trace.Attribute{
+				trace.StringAttribute("error", parentContext.Err().Error()),
+			}, "Context expired")
 		return
 	}
 
@@ -347,24 +369,38 @@ func (service *ContentService) ServeHTTP(
 		return
 	}
 
+	span.AddAttributes(trace.StringAttribute("site-id", siteID))
+
 	if myURL, err = url.Parse("http://" + siteID + r.RequestURI); err != nil {
 		log.Print("Unable to parse original request URI: ", r.RequestURI)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Error parsing request URI"))
+		span.Annotate(
+			[]trace.Attribute{
+				trace.StringAttribute("error", err.Error()),
+			}, "Request URI parsing failed")
 		return
 	}
+
+	span.Annotate(nil, "Running Casandra query")
 
 	query = service.session.Query(
 		"SELECT content_type, file_location, offset, length FROM "+
 			"file_contents WHERE site = ? AND path = ?",
-		siteID, myURL.Path).WithContext(parentContext)
+		siteID, myURL.Path).WithContext(ctx)
 	defer query.Release()
 	if err = query.Scan(&contentType, &location, &offset, &length); err != nil {
 		log.Print("Unable to scan for ", myURL.Path, ": ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Error fetching content metadata"))
+		span.Annotate(
+			[]trace.Attribute{
+				trace.StringAttribute("error", err.Error()),
+			}, "Scanning Cassandra table failed")
 		return
 	}
+
+	span.Annotate(nil, "Cassandra results are in")
 
 	cassandraLatencies.Observe(
 		(time.Duration(query.Latency()) * time.Nanosecond).Seconds())
@@ -374,46 +410,76 @@ func (service *ContentService) ServeHTTP(
 		log.Print("Unable to parse location for ", location, ": ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Error processing content metadata"))
+		span.Annotate(
+			[]trace.Attribute{
+				trace.StringAttribute("error", err.Error()),
+			}, "Location URI parsing failed")
 		return
 	}
 
-	if reader, err = filesystem.OpenReader(parentContext, contentURL); err != nil {
+	span.AddAttributes(
+		trace.StringAttribute("content-url", contentURL.String()),
+		trace.StringAttribute("content-type", contentType),
+		trace.Int64Attribute("content-length", length))
+
+	if reader, err = filesystem.OpenReader(ctx, contentURL); err != nil {
 		log.Print("Unable to open ", contentURL.String(), ": ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Error processing content metadata"))
+		span.Annotate(
+			[]trace.Attribute{
+				trace.StringAttribute("error", err.Error()),
+			}, "Opening content URL failed")
 		return
 	}
 	defer logError(fmt.Sprintf("Error closing reader for %s",
-		contentURL.String()), reader.Close(parentContext))
+		contentURL.String()), reader.Close(ctx))
 
 	if seeker, ok = reader.(filesystem.Seeker); !ok {
 		log.Print("Filesystem type for ", contentURL.String(),
 			" does not support seeking")
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Backend not supported"))
+		span.Annotate(nil, "Backend does not support seeking")
 		return
 	}
 
-	if _, err = seeker.Seek(parentContext, offset, io.SeekStart); err != nil {
+	if _, err = seeker.Seek(ctx, offset, io.SeekStart); err != nil {
 		log.Print("Error seeking in ", contentURL.String(), ": ", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Read error"))
+		span.Annotate(
+			[]trace.Attribute{
+				trace.StringAttribute("error", err.Error()),
+			}, "Seek failed")
 		return
 	}
 
 	limitedReader = &filesystem.LimitedReadCloser{R: reader, N: length}
 
 	for {
+		var readTrace *trace.Span
+		var readCtx context.Context
 		var readLength int
 
 		if parentContext.Err() != nil {
 			/* TODO: increment a counter with the category of error */
+			span.Annotate(
+				[]trace.Attribute{
+					trace.StringAttribute("error",
+						parentContext.Err().Error()),
+				}, "Context expired")
 			break
 		}
 
+		readCtx, readTrace = trace.StartSpan(
+			ctx, "ContentService.ServeHTTP.Read")
+		defer readTrace.End()
+
 		numReadsRequired++
-		readLength, err = limitedReader.Read(parentContext, buf)
+		readLength, err = limitedReader.Read(readCtx, buf)
 		if err == io.EOF {
+			readTrace.AddAttributes(trace.BoolAttribute("eof", true))
 			break
 		}
 		if err != nil {
@@ -422,8 +488,14 @@ func (service *ContentService) ServeHTTP(
 				w.WriteHeader(http.StatusInternalServerError)
 				w.Write([]byte("Read error"))
 			}
+			readTrace.Annotate(
+				[]trace.Attribute{
+					trace.StringAttribute("error", err.Error()),
+				}, "Content read error")
 			break
 		}
+		readTrace.AddAttributes(
+			trace.Int64Attribute("length", int64(readLength)))
 
 		bytesPerRead.Observe(float64(readLength))
 
@@ -436,6 +508,8 @@ func (service *ContentService) ServeHTTP(
 
 		if _, err = w.Write(buf[:readLength]); err != nil {
 			log.Print("Unable to write client response: ", err)
+		} else {
+			readTrace.Annotate(nil, "Success")
 		}
 	}
 

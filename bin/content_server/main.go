@@ -5,14 +5,12 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
-	"contrib.go.opencensus.io/exporter/prometheus"
 	"contrib.go.opencensus.io/exporter/zipkin"
 	"github.com/childoftheuniverse/cstatic/server"
 	_ "github.com/childoftheuniverse/filesystem-file"
@@ -21,7 +19,6 @@ import (
 	openzipkinModel "github.com/openzipkin/zipkin-go/model"
 	zipkinReporter "github.com/openzipkin/zipkin-go/reporter"
 	zipkinHTTP "github.com/openzipkin/zipkin-go/reporter/http"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	etcd "go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/pkg/transport"
 	"go.opencensus.io/plugin/ocgrpc"
@@ -65,7 +62,6 @@ func main() {
 	var client *etcd.Client
 	var tlsConfig *tls.Config
 	var tlsInfo transport.TLSInfo
-	var pe *prometheus.Exporter
 	var err error
 
 	if thisHost, err = os.Hostname(); err != nil {
@@ -104,14 +100,6 @@ func main() {
 	if err = view.Register(ocgrpc.DefaultServerViews...); err != nil {
 		log.Fatal("Error registering default gRPC server views: ", err)
 	}
-
-	if pe, err = prometheus.NewExporter(prometheus.Options{
-		Namespace: "cstatic_content_server",
-	}); pe != nil {
-		log.Fatal("Error creating prometheus exporter: ", err)
-	}
-	http.Handle("/metrics", promhttp.Handler())
-	http.Handle("/metrics-grpc", pe)
 
 	if zipkinEndpoint != "" {
 		var localEndpoint *openzipkinModel.Endpoint

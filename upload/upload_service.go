@@ -14,15 +14,17 @@ import (
 	"sync"
 	"time"
 
+	prom_exporter "contrib.go.opencensus.io/exporter/prometheus"
 	"github.com/childoftheuniverse/cstatic"
 	"github.com/childoftheuniverse/cstatic/config"
 	"github.com/childoftheuniverse/filesystem"
-	etcd "go.etcd.io/etcd/clientv3"
-	"go.etcd.io/etcd/mvcc/mvccpb"
 	"github.com/gocql/gocql"
 	"github.com/golang/protobuf/proto"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	etcd "go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/mvcc/mvccpb"
+	"go.opencensus.io/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -302,6 +304,7 @@ func (service *UploadService) MainLoop(
 	listener net.Listener, rpcListener net.Listener,
 	tlsConfig *tls.Config) error {
 	var opts []grpc.ServerOption
+	var pe *prom_exporter.Exporter
 	var proto = "http"
 	var err error
 
@@ -373,7 +376,14 @@ func (service *UploadService) MainLoop(
 	if err = prometheus.Register(cassandraRetries); err != nil {
 		return err
 	}
+
+	if pe, err = prom_exporter.NewExporter(prom_exporter.Options{
+		Namespace: "cstatic_content_server",
+	}); pe != nil {
+		return fmt.Errorf("Error creating prometheus exporter: %s", err)
+	}
 	service.mux.Handle("/metrics", promhttp.Handler())
+	service.mux.Handle("/metrics-grpc", pe)
 
 	service.grpcServer = grpc.NewServer(opts...)
 	cstatic.RegisterUploadServiceServer(service.grpcServer, service)
@@ -428,12 +438,18 @@ func (service *UploadService) UploadSingleFile(
 		"rpc_command": "UploadSingleFile"}).Observe(
 		time.Now().Sub(startTime).Seconds())
 
+	var parentContext = stream.Context()
+	var ctx context.Context
+	var span *trace.Span
+
+	ctx, span = trace.StartSpan(parentContext, "UploadService.UploadSingleFile")
+	defer span.End()
+
 	service.settingsLock.RLock()
 	defer service.settingsLock.RUnlock()
 	service.currentFileLock.Lock()
 	defer service.currentFileLock.Unlock()
 
-	var parentContext = stream.Context()
 	var query *gocql.Query
 	var siteID string
 	var path string
@@ -446,8 +462,15 @@ func (service *UploadService) UploadSingleFile(
 
 	/* Before we do anything, check that this RPC is still relevant. */
 	if parentContext.Err() != nil {
+		span.Annotate(
+			[]trace.Attribute{
+				trace.StringAttribute("error", parentContext.Err().Error()),
+			}, "Context expired")
 		return parentContext.Err()
 	}
+
+	span.AddAttributes(
+		trace.BoolAttribute("healthy", service.IsHealthy()))
 
 	if !service.IsHealthy() {
 		if err = stream.SendAndClose(
@@ -455,18 +478,28 @@ func (service *UploadService) UploadSingleFile(
 			log.Print("Error closing upload stream for error reporting: ", err)
 		}
 		requestsLostDueToUnhealthy.Inc()
+		span.Annotate(nil, "Server not healthy")
 		return status.Error(codes.Unavailable, "Server is not healthy")
 	}
 
 	for {
+		var writeTrace *trace.Span
+		var writeCtx context.Context
 		var req *cstatic.UploadSingleFileRequest
 		var readLength int
+
+		writeCtx, writeTrace = trace.StartSpan(
+			ctx, "UploadService.UploadSingleFile.Write")
+		defer writeTrace.End()
 
 		req, err = stream.Recv()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			writeTrace.Annotate([]trace.Attribute{
+				trace.StringAttribute("error", err.Error()),
+			}, "Error receiving write request")
 			return err
 		}
 
@@ -485,6 +518,9 @@ func (service *UploadService) UploadSingleFile(
 			}
 
 			if !found {
+				writeTrace.Annotate([]trace.Attribute{
+					trace.StringAttribute("site-id", req.WebsiteIdentifier),
+				}, "Unknown website identifier")
 				return status.Error(codes.NotFound, "Site not configured")
 			}
 
@@ -494,18 +530,36 @@ func (service *UploadService) UploadSingleFile(
 			contentType = req.ContentType
 		}
 
-		readLength, err = service.currentFile.Write(parentContext, req.Contents)
+		readLength, err = service.currentFile.Write(writeCtx, req.Contents)
 		service.currentFileSize += uint64(readLength)
 		if err != nil {
+			writeTrace.Annotate([]trace.Attribute{
+				trace.StringAttribute("error", err.Error()),
+			}, "Error writing data")
 			return err
 		}
 
 		length += uint64(readLength)
 
 		if parentContext.Err() != nil {
+			span.Annotate(
+				[]trace.Attribute{
+					trace.StringAttribute("error",
+						parentContext.Err().Error()),
+				}, "Context expired")
 			return parentContext.Err()
 		}
 	}
+
+	span.AddAttributes(
+		trace.StringAttribute("site-id", siteID),
+		trace.StringAttribute("request-uri", path),
+		trace.StringAttribute("content-url",
+			service.currentFilePath.String()),
+		trace.StringAttribute("content-type", contentType),
+		trace.Int64Attribute("content-length", int64(length)))
+
+	span.Annotate(nil, "Updating Cassandra metadata")
 
 	query = service.session.Query(
 		"UPDATE file_contents SET content_type = ?, file_location = ?, "+
@@ -513,7 +567,7 @@ func (service *UploadService) UploadSingleFile(
 		contentType, service.currentFilePath.String(), offset, length,
 		time.Now(), siteID, path)
 	defer query.Release()
-	if err = query.WithContext(parentContext).Exec(); err != nil {
+	if err = query.WithContext(ctx).Exec(); err != nil {
 		return err
 	}
 
@@ -523,6 +577,9 @@ func (service *UploadService) UploadSingleFile(
 
 	if err = stream.SendAndClose(
 		&cstatic.UploadSingleFileResponse{}); err != nil {
+		span.Annotate([]trace.Attribute{
+			trace.StringAttribute("error", err.Error()),
+		}, "Error sending result")
 		return err
 	}
 
